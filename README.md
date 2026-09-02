@@ -1,6 +1,8 @@
 # Оценка племенной ценности: rrBLUP и somer
 
-Набор из пяти R Markdown-отчётов. По демонстрационным данным они считают BLUP-оценки племенной ценности (EBV) в R — по родословной, с геномной матрицей и со случайным эффектом хозяйства — и сравнивают rrBLUP, somer и BLUPF90.
+Проект на **R**: пять Jupyter-ноутбуков. По демонстрационным данным они считают BLUP-оценки племенной ценности (EBV) — по родословной, с геномной матрицей и со случайным эффектом хозяйства — и сравнивают rrBLUP, somer и BLUPF90.
+
+Ячейки уже выполнены: таблицы и графики сохранены внутри `.ipynb`.
 
 ---
 
@@ -22,14 +24,22 @@
 ```text
 .
 ├── README.md
-├── 01_rrblup_pedigree.Rmd         pedigree BLUP (rrBLUP, матрица A)
-├── 02_rrblup_ssgblup.Rmd          ssGBLUP (rrBLUP, матрица H)
-├── 03_rrblup_farm_effect.Rmd      ssGBLUP плюс случайный эффект хозяйства
-├── 04_somer.Rmd                   смешанная модель в somer (`mmes`)
-├── 05_methods_comparison.Rmd      производительность и сравнение методов
-├── data/                          CSV и скрипт генерации
-├── reports/                       готовый HTML-вывод
-└── render_reports.R               пересборка всех отчётов
+├── r_blup.Rproj                   проект R / RStudio
+├── 01_rrblup_pedigree.ipynb       pedigree BLUP (rrBLUP, матрица A)
+├── 02_rrblup_ssgblup.ipynb        ssGBLUP (rrBLUP, матрица H)
+├── 03_rrblup_farm_effect.ipynb    ssGBLUP плюс случайный эффект хозяйства
+├── 04_somer.ipynb                 смешанная модель в somer (`mmes`)
+├── 05_methods_comparison.ipynb    производительность и сравнение методов
+├── data/
+│   ├── pedigree.csv               animal, sire, dam
+│   ├── phenotypes.csv             признак, фиксированные эффекты, tbv
+│   ├── genotypes.csv              SNP-строка у части животных
+│   └── estimations.csv            эталон: progenes = TBV
+└── tools/
+    ├── generate_data.R            синтетические CSV в data/
+    ├── execute_notebooks.R        прогон всех ноутбуков
+    ├── execute_one_notebook.R     выполнение одного ноутбука
+    └── merge_notebook_outputs.py  вшивка вывода в .ipynb
 ```
 
 Читать по номерам: `01` → `05`. Каждый файл начинается с блока **«О документе»**: источник данных, цель, короткий результат.
@@ -40,11 +50,11 @@
 
 | Файл | Вопрос | Данные | Методы |
 |---|---|---|---|
-| **01** Pedigree BLUP | Как оценить EBV только по родословной? | `pedigree.csv`, `phenotypes.csv` | A-матрица, `mixed.solve`, SE, reliability |
-| **02** ssGBLUP | Как учесть и родословную, и SNP? | + `genotypes.csv` | матрицы A, M, G, H; `mixed.solve` |
-| **03** Хозяйство | Как добавить случайный эффект фермы? | то же + `economy` | две Z-матрицы, блочная K |
-| **04** somer | Та же модель формулой `mmes`? | то же | `vsm(ism(animal), Gu = H)` |
-| **05** Сравнение | Согласованы ли rrBLUP, somer и эталон? | `phenotypes.csv`, `pedigree.csv` | Спирмен, Манна–Уитни, Бланд–Альтман |
+| [`01_rrblup_pedigree.ipynb`](01_rrblup_pedigree.ipynb) | Как оценить EBV только по родословной? | [`data/pedigree.csv`](data/pedigree.csv), [`data/phenotypes.csv`](data/phenotypes.csv) | A-матрица, `mixed.solve`, SE, reliability |
+| [`02_rrblup_ssgblup.ipynb`](02_rrblup_ssgblup.ipynb) | Как учесть и родословную, и SNP? | + [`data/genotypes.csv`](data/genotypes.csv) | матрицы A, M, G, H; `mixed.solve` |
+| [`03_rrblup_farm_effect.ipynb`](03_rrblup_farm_effect.ipynb) | Как добавить случайный эффект фермы? | то же + `economy` | две Z-матрицы, блочная K |
+| [`04_somer.ipynb`](04_somer.ipynb) | Та же модель формулой `mmes`? | то же | `vsm(ism(animal), Gu = H)` |
+| [`05_methods_comparison.ipynb`](05_methods_comparison.ipynb) | Согласованы ли rrBLUP, somer и эталон? | `phenotypes.csv`, `pedigree.csv` | Спирмен, Манна–Уитни, Бланд–Альтман |
 
 ### Таблицы
 
@@ -57,40 +67,26 @@
 
 ---
 
-## Готовый вывод
-
-После сборки HTML лежит в `reports/`:
-
-- [01_rrblup_pedigree.html](reports/01_rrblup_pedigree.html)
-- [02_rrblup_ssgblup.html](reports/02_rrblup_ssgblup.html)
-- [03_rrblup_farm_effect.html](reports/03_rrblup_farm_effect.html)
-- [04_somer.html](reports/04_somer.html)
-- [05_methods_comparison.html](reports/05_methods_comparison.html)
-
-В каждом отчёте оглавление слева, таблицы и графики уже встроены.
-
----
-
 ## Как пересобрать
 
-Нужны **R 4.x**, пакеты ниже и **pandoc** (достаточно pandoc из RStudio).
+Нужны **R 4.x**, пакеты ниже и **Python 3** (`json`).
 
 ```r
 install.packages(c(
   "rrBLUP", "AGHmatrix", "pedigreeTools", "sommer",
   "dplyr", "tidyr", "stringr", "e1071", "ggplot2",
-  "knitr", "rmarkdown", "kableExtra", "Matrix"
+  "knitr", "Matrix", "jsonlite", "evaluate", "base64enc"
 ))
 ```
 
 Из корня репозитория:
 
 ```bash
-Rscript data/generate_data.R
-Rscript render_reports.R
+Rscript tools/generate_data.R
+Rscript tools/execute_notebooks.R
 ```
 
-Первая команда пишет CSV в `data/`. Вторая собирает HTML в `reports/`.
+Первая команда пишет CSV в `data/`. Вторая заново выполняет все ячейки и сохраняет вывод в ноутбуках.
 
 Демо-данные синтетические (`set.seed(42)`), чтобы репозиторий был самодостаточным. Скрипт генерации можно заменить своими выгрузками с теми же именами столбцов.
 
@@ -98,7 +94,6 @@ Rscript render_reports.R
 
 ## Единый стиль отчётов
 
-- YAML: дата, `html_document`, тема **flatly**, оглавление слева.
-- Чанки с кодом скрыты: в HTML виден результат, а не листинг.
+- Jupyter Notebook, ядро R.
 - Русские заголовки, английские имена переменных в обратных кавычках.
 - В начале каждого файла — паспорт отчёта, в конце — короткое заключение.
