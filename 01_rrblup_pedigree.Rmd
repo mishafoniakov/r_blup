@@ -1,0 +1,421 @@
+```{r include=FALSE}
+fix_categorical_effects = c('event_season', 'event_year')
+fix_numerical_effects = c('dam_age', 'okot_massa', 'okot_number')
+random_categorical_effects = 'economy'
+is_random = FALSE
+diagonal_coefficient = 0.2
+```
+
+---
+title: "01. Pedigree BLUP в rrBLUP"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_depth: 3
+    toc_float:
+      collapsed: false
+    theme: flatly
+    highlight: tango
+    df_print: paged
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo = FALSE,
+  include = FALSE,
+  error = FALSE,
+  warning = FALSE,
+  message = FALSE,
+  fig.align = "center"
+)
+```
+
+# О документе
+
+Отчёт считает оценку племенной ценности **только по родословной**, без SNP.
+
+| | |
+|---|---|
+| **Данные** | `data/pedigree.csv`, `data/phenotypes.csv` |
+| **Цель** | Собрать матрицы A, X, Z и получить EBV через `mixed.solve` |
+| **Результат** | EBV, стандартная ошибка и reliability для каждого животного |
+
+```{r}
+library(rrBLUP)
+library(AGHmatrix)
+library(Matrix)
+library(pedigreeTools)
+library(dplyr)
+library(tidyr)
+library(e1071)
+```
+
+# Вступление
+
+Оценка племенной ценности методом BLUP (Best Linear Unbiased Prediction) является стандартом в генетике животных. Несмотря на широкое распространение специализированного програмного обеспечения, такого как семейство программ BLUPF90, в некоторых случаях может быть целесообразно реализовать расчёт вручную с помощью языка R. Это позволяет получить полный контроль над моделью, гибко адаптировать структуру данных, визуализировать промежуточные шаги и глубже понять математическую сущность модели.
+
+Преимущества расчёта в среде R по сравнению с расчётом с помощью программы BLUPF90:
+
+- Гибкость в модели. Возможность свободно варьировать структуру фиксированных и случаёных эффектов;
+
+- Прозрачность алгоритма. Все необходимые матрицы создаются вручную. Мы видим, что происходит;
+
+- Визуализация и диагностика. Можно сделать любую визуализацию на каждом этапе;
+
+- Удобная отладка. При ошибке можно локализовать этап, где возникла проблема;
+
+- Возможность включения новых алгоритмов. Можно добавить любой алгоритм, который повысит точность полученной оценки
+
+В данной работе была применена простая линейная модель для оценки племенной ценности животных методом BLUP.
+
+# 1. Загрузка данных
+
+В первую очередь необходимо загрузить необходимые нам данные: 
+
+- Данные родословной;
+
+- Фенотипические данные.
+
+Это обязательные данные для расчёта качественной оценки. Таблицы читаются из CSV, заранее сохранённых скриптом `generate_data.R`.
+
+```{r}
+phenotypes <- read.csv('data/phenotypes.csv') %>%
+  dplyr::select(animal, okot_massa, okot_number, dam_age, event_season, event_year, trait)
+pedigree <- read.csv('data/pedigree.csv')
+common_levels <- levels(as.factor(unique(c(phenotypes$animal, pedigree$animal, pedigree$dam, pedigree$sire))))
+```
+
+```{r include=TRUE}
+knitr::kable(head(pedigree, 5), booktabs=TRUE, caption='Данные родословной (фрагмент)')
+knitr::kable(head(phenotypes, 5), booktabs=TRUE, caption='Данные фенотипов (фрагмент)')
+```
+
+Теперь, когда у нас есть все необходимые нам данные, мы можем приступать к их преобразованию для дальнейшей работы с ними.
+
+
+# 2. Преобразование загруженных данных
+
+Преобразование данных является неотъемлемой частью работы. Нам их необходимо преобразовать так, чтобы в дальнейшем их использовать для подачи в матрицы. С помощью этих матриц мы и будем рассчитывать оценки племенной ценности
+
+## 2.1. Проверка данных фенотипов на выбросы и аномалии
+
+Мы начинаем преобразование данных с проверки данных фенотипов (переменной *trait*) на выбросы. Для этого нам необходим Z-score порог.
+
+Z-score порог - это значение Z-score, которое используется для идентификации выбросов или необычных наблюдений в данных. Он играет роль границы и квалифицирует наблюдение как аномальное. Он рассчитывается по следующей формуле:
+
+$$
+Z = \frac{{X - \mu}}{{\sigma}}
+$$
+Где:
+- $X$ — отдельное наблюдение,
+- $\mu$ — среднее значение массива,
+- $\sigma$ — стандартное отклонение массива
+
+Для проверки качества отфильтрованного массива мы будем использовать две переменные:
+
+1. Ассиметрия (skewness) - это мера ассиметрии распределения относительно его среднего значения;
+
+2. Эксцесс (kurtosis) - характеристика толщины хвостов и "заострения" пика распределения
+
+Мы должны подобрать такой Z-score, чтобы ассиметрия и эксцесс были наиболее близки к 0.
+
+```{r}
+# Z-score filter
+z_score_filter <- function(pipeline, threshold) {
+  array <- na.omit(pipeline$trait)
+  mean_array <- mean(pipeline$trait)
+  sd_array <- sd(pipeline$trait)
+  z_scores <- abs((pipeline$trait - mean_array) / sd_array)
+  outliers <- pipeline$trait[z_scores > threshold]
+  pipeline <- pipeline %>%
+    filter(!(trait %in% outliers))
+  print(paste('Skewness =', skewness(pipeline$trait)))
+  print(paste('Kurtosis =', kurtosis(pipeline$trait)))
+  print(qqplot_distribution(pipeline$trait, 'trait'))
+  return(pipeline)
+}
+
+qqplot_distribution <- function(array, name) {
+  qqnorm(array,
+         main=paste('QQPlot распределения переменной', name, sep=' '),
+         xlab='Теоретические квантили',
+         ylab='Квантили массива')
+  qqline(array,
+         col='red')
+}
+```
+
+```{r}
+phenotypes <- z_score_filter(phenotypes, 2)
+```
+
+Преобразование данных является неотъемлемой частью работы. Нам их необходимо преобразовать так, чтобы в дальнейшем их использовать для подачи в матрицы. С помощью этих матриц мы и будем рассчитывать оценки племенной ценности
+
+## 2.2. Синхронизация родословной
+В первую очередь, нам важно синхронизировать наши данные по родословной и генетики с данными фенотипов. Т.е. в этих двух датасетах оставить только тех животных, которые присутствуют в фенотипических данных. 
+
+Затем нужно синхронизировать данные фенотипов. Это удаление пропущенных значений в любой из колонок - пропущенные значения отрицательно влияют на точность оценок. Затем - это синхронизация данных фенотипов с данными родословной. То есть в фенотипических данных присутсвуют только те животные, которые есть в родословной
+```{r}
+pedigree <- pedigree %>%
+  filter((animal %in% phenotypes$animal) | (dam %in% phenotypes$animal) | (sire %in% phenotypes$animal))
+phenotypes <- phenotypes %>%
+  drop_na() %>%
+  filter(animal %in% pedigree$animal)
+```
+
+```{r include=TRUE}
+knitr::kable(head(pedigree, 5), booktabs=TRUE, caption='Данные родословной (фрагмент)')
+knitr::kable(head(phenotypes, 5), booktabs=TRUE, caption='Данные фенотипов (фрагмент)')
+```
+
+## 2.3. Преобразование родословной и фенотипов
+
+На этом этапе мы заменяем ID животного, которое было у нас изначально из данных на номер, который мы получили согласно полному списку животных. С номером будет намного проще и удобнее строить матрицы, чем с использованием ID. 
+
+Также мы всем колонкам присваиваем определённые типы: 
+
+- колонки с номерами животных получают тип **integer**; 
+
+- колонки с нумерованными эффектами получают тип **numeric**; 
+
+- колонки с категориальными эффектами получают тип **factor**. 
+
+Такая чёткая градация необходима для дальнейшего расчёта оценок.
+
+```{r}
+pedigree_bl <- pedigree %>%
+  mutate(across(c(animal, dam, sire), ~as.integer(factor(., levels = common_levels))))
+phenotypes_bl <- phenotypes %>%
+  mutate(animal = as.integer(factor(animal, levels=common_levels))) %>%
+  mutate(across(all_of(fix_categorical_effects), ~factor(.x))) %>%
+  mutate(across(all_of(fix_numerical_effects), ~as.numeric(.x)))
+  #mutate(across(all_of(random_categorical_effects), ~factor(.x)))
+```
+
+```{r include=TRUE}
+knitr::kable(head(pedigree_bl, 5), booktabs=TRUE, caption='Данные родословной (фрагмент)')
+knitr::kable(head(phenotypes_bl, 5), booktabs=TRUE, caption='Данные фенотипов (фрагмент)')
+```
+
+## 2.4. Cинхронизация данных родословной
+Здесь наша родословная нуждается в специальном преобразовании, ей необходимо присвоить определённый порядок, чтобы вначале было показано животное в столбце "animal" и только потом это животное появлялось в столбцах предков - "dam" и "sire". Такое преобразование будет сделано с помощью специальной функции editPed библиотеки "pedigreeTools".
+```{r}
+pedigree_bl <- editPed(label=pedigree_bl$animal, dam = pedigree_bl$dam, sire = pedigree_bl$sire)[c('label', 'sire', 'dam')]
+pedigree_bl <- pedigree_bl %>%
+  filter(label %in% phenotypes_bl$animal)
+```
+
+Далее пропущенные значения у предков будут заменены на 0. Наконец, индексы в данных по родословной мы поставим сходими с номерами животных (колонка "label" в родословной).
+```{r}
+pedigree_bl$sire[!(pedigree_bl$sire %in% pedigree_bl$label)] <- 0
+pedigree_bl$dam[!(pedigree_bl$dam %in% pedigree_bl$label)] <- 0
+rownames(pedigree_bl) <- pedigree_bl$label
+```
+
+```{r include=TRUE}
+knitr::kable(head(pedigree_bl, 5), booktabs=TRUE, caption='Данные родословной (фрагмент)')
+knitr::kable(head(phenotypes_bl, 5), booktabs=TRUE, caption='Данные фенотипов (фрагмент)')
+```
+
+После этого все необходимые преобразования данных выполнены. Моржно приступать непосредственно к построению матриц для расчёта оценки племенной ценности.
+
+
+# 3. Постоение матриц
+
+Матрицы — основа BLUP. Здесь используются:
+
+- *матрица A* по родословной;
+- *матрица X* фиксированных эффектов;
+- *матрица Z* инцидентности животных.
+
+Геномных матриц G и H нет: родство только из родословной (`K = A`). Вспомогательные преобразования (усадка, сглаживание, регуляризация) оставлены на случай, если матрица A окажется плохо обусловленной.
+
+```{r}
+shrinkage <- function(matrix, lambda) {
+  matrix_shrink <- (1 - lambda) + matrix + lambda + diag(nrow(matrix))
+  return(matrix_shrink)
+}
+
+bending <- function(matrix, epsilon) {
+  e <- eigen(matrix)
+  e$values[e$values < epsilon] <- epsilon
+  matrix_bent <- e$vectors %*% diag(e$values) %*% t(e$vectors)
+  rownames(matrix_bent) <- rownames(matrix)
+  colnames(matrix_bent) <- colnames(matrix)
+  return(matrix_bent)
+}
+
+standartization_1 <- function(A_matrix, G_matrix) {
+  A22 <- A_matrix[rownames(G_matrix), rownames(G_matrix)]
+  scaling_factor <- sum(diag(A22)) / sum(diag(G_matrix))
+  matrix_scaled <- G_matrix * scaling_factor
+  return(matrix_scaled)
+}
+
+inversing <- function(matrix, epsilon) {
+  matrix_inv <- matrix + diag(epsilon, nrow(matrix))
+  return(matrix_inv)
+}
+
+m_standartization <- function(M_matrix) {
+  M_sd <- apply(M_matrix, 2, sd, na.rm = TRUE)
+  M_filtered <- M_matrix[, M_sd > 0]
+  M_scaled <- scale(M_filtered, center=TRUE, scale=FALSE)
+  return(M_scaled)
+}
+
+standartization_2 <- function(A_matrix, G_matrix) {
+  tr_A <- sum(diag(A_matrix))
+  tr_G <- sum(diag(G_matrix))
+  A_scaled <- A * (tr_G / tr_A)
+  return(A_scaled)
+}
+```
+
+## 3.1. Построение A матрицы родословной
+
+Мы начнём с построения матрицы родословной. Она называется *A-матрицей*. Это матрица родственных коэффициентов, построенная по родословной. Она показывает отношения между всеми парами животных - насколько они похожи по информации родословной. Размер матрицы - *nrow(pedigree) x nrow(pedigree)*
+Как рассчитываются коэффициенты внутри матрицы? 
+
+- Диагональный коэффициент = 1 + инбридинг. 
+
+- Остальные коэффициенты: 0.5 - родитель-потомок, 0.25 - родитель родителя - внук ...
+
+```{r}
+A <- Amatrix(pedigree_bl, ploidy = 2)
+rownames(A) <- as.numeric(rownames(A))
+```
+
+```{r include=TRUE}
+knitr::kable(A[1:5, 1:5], booktabs=TRUE, caption='Матрица А (фрагмент)')
+```
+
+Также мы рассчитаем обратную матрицу A**-1. Она отражает влияние родителей на потомка. Такая матрица состоит из следующих компонентов. Диагональный коэффициент: если оба родителя неизвестны - 1, если один родитель известен - тогда ~ 1.33, если оба родители известны - 2. Остальные коэффициенты: если присутствует влияние родителей - отрицательные значения, если нет влияния родителей - 0.
+При расчёте обратной матрицы важно провести регуляризацию!
+```{r}
+A_inv <- solve(A + diag(1e-6, nrow(A)))
+```
+
+```{r include=TRUE}
+knitr::kable(A_inv[1:5, 1:5], booktabs=TRUE, caption='Обратная матрица А (фрагмент)')
+```
+
+Теперь мы должны синхронизировать наши данные по фенотипам с данными в матрице A, включая порядок номеров животных
+```{r}
+A_animals <- rownames(A)
+
+phenotypes_bl <- phenotypes_bl[phenotypes_bl$animal %in% A_animals, ]
+phenotypes_bl <- phenotypes_bl[order(match(phenotypes_bl$animal, A_animals)), ]
+```
+
+```{r}
+#проверка
+all(unique(phenotypes_bl$animal) == unique(rownames(A)))
+```
+## 3.2. Построение матрицы эффектов
+
+### 3.2.1. Построение X матрицы фиксированных эффектов
+
+Следующую матрицу, которую мы будем строить, будет матрица фиксированных эффектов. Хочу ещё раз указать на важность присвоения каждой колонке определённого типа (*пункт 2.2*). Именно от этого действия будет зависить построение матрицы X.
+
+Матрица X похожа на матрицу фенотипов с некоторыми особенностями: 
+
+- Нет данных по трейту; 
+
+- Данные по присвоенному номеру животного присутствует только в индексах; 
+
+- Нумерованные эффекты автоматически отражены без изменений; 
+
+- Категориальные эффекты автоматически отражены по принципу "*OneHotEncoding*"
+
+
+```{r}
+X <- model.matrix(~ dam_age + okot_massa + okot_number + event_season + event_year, data=phenotypes_bl)  
+```
+
+```{r include=TRUE}
+knitr::kable(X[1:5, 1:5], booktabs=TRUE, caption='Матрица X (фрагмент)')
+```
+
+Здесь важнен тот факт, что для точности оценки нам необходимо как можно больше эффектов как нумерованных, так и категориальных.
+
+Проверяем линейную зависимость в матрице фиксированных эффектов
+```{r}
+# проверка
+cat('Rank X:', qr(X)$rank, 'of', ncol(X))
+```
+
+### 3.2.2. Построение Z матрицы случайных эффектов
+
+Если мы добавили в наши данные случайный эффект (т.е. тот эффект, который нам необходимо учитывать исключительно вместе с животным), нам необходимо построить Z матрицу случайного эффекта. Это будет последняя матрица, которую нам необходимо будет построить. Важно, что библиотека **rrBLUP** принимает только один случайный эффект. Само строение Z-матрицы cхоже с матрицей X с тем исключением, что мы используем здесь только один эффект, который автоматически обрабатывается в зависимости от его типа. Для того, чтобы была возможность обработки нескольких случайных эффектов, надо провести некоторые преобразования:
+
+```{r}
+Z <- model.matrix(~ 0 + as.factor(animal), data=phenotypes_bl)
+```
+
+```{r include=TRUE}
+knitr::kable(Z[1:5, 1:2], booktabs=TRUE, caption='Матрица Z (фрагмент)')
+```
+Так мы закончили построение матрицы эффектов.
+
+# 4. Расчёт оценки племенной ценности у животных
+
+Расчёт оценки племенной ценности мы будем производить с помощью функции mixed.solved из библиотеки rrBLUP. 
+
+Для расчёта оценки мы берём:
+
+- в случае отсутствия случайного эффекта: значение трейта из данных фенотипов, матрица Х;
+
+- в случае наличия случайного эффекта: значение трейта из данных фенотипов, матрица Х, матрица Z;
+
+## 4.1. Расчёт непосредственно самой оценки
+```{r}
+res <- mixed.solve(
+  y=phenotypes_bl$trait, 
+  X=X,
+  Z=Z,
+  K=A
+)
+names(res$u) <- common_levels[as.numeric(names(res$u))]
+EBV <- res$u
+```
+
+Мы получаем оценки племенной ценности у животных. Теперь посмотрим на их распределение
+```{r include=TRUE}
+hist(EBV, breaks = 100, main = "Оценки племенной ценности", xlab = "EBV")
+```
+## 4.2. Расчёт стандартной ощибки среднего
+
+Стандартная ошибка среднего 
+
+```{r}
+SE <- sqrt(res$Vu * diag(A_inv))
+names(SE) <- common_levels[as.numeric(names(SE))]
+```
+
+```{r include=TRUE}
+hist(SE, breaks = 100, main = "Стандартная ошибка оценок племенной ценности", xlab = "SE")
+```
+
+```{r}
+solutions <- as.data.frame(cbind(EBV, SE))
+```
+
+## 4.3. Расчёт точности
+```{r}
+solutions$reliability <- ((solutions$SE ** 2) / res$Vu)
+```
+
+```{r include=TRUE}
+hist(solutions$reliability, breaks = 100, main = "Точность оценок племенной ценности", xlab = "Reliability")
+```
+
+# 6. Заключение
+
+В ходе работы была проведена оценка племенной ценности животных методом BLUP c использованием специализированной библиотеки rrBLUP. В качестве фиксированных эффектов учитывались фенотипические данные.
+
+Полученные EBV оценки могут быть использованы для отбора и селекции, так как они учитывают как генетическую информацию, так и родословные данные. Таким образом, модель обеспечивает более точную и сбалансированную оценку животных по сравнению с традиционными методами как оценка по срерднему потомству или фенотипу.
+
+
+
