@@ -1,21 +1,23 @@
-# Оценка племенной ценности: rrBLUP и somer
+# Смешанные модели качества продукции: BLUP по связям и маркерам
 
-Проект на **R**: пять Jupyter-ноутбуков. По демонстрационным данным они считают BLUP-оценки племенной ценности (EBV) — по родословной, с геномной матрицей и со случайным эффектом хозяйства — и сравнивают rrBLUP, somer и BLUPF90.
+Проект на **R**: семь Jupyter-ноутбуков. По демонстрационным данным они считают прогнозные оценки качества изделий — по таблице связей, с маркерной панелью и со случайным эффектом завода — и собирают сводный индекс состава.
 
-Ячейки уже выполнены: таблицы и графики сохранены внутри `.ipynb`.
+Ячейки уже выполнены: таблицы и графики сохранены внутри `.ipynb`. Данные в `data/` синтетические.
 
 ---
 
 ## Зачем это репозиторий
 
-Проект отвечает на четыре практических вопроса:
+Проект отвечает на шесть практических вопросов:
 
-1. Как собрать pedigree BLUP в R, если SNP ещё нет?
-2. Как объединить родословную и генотипы в матрицу H (ssGBLUP)?
-3. Как добавить случайный эффект хозяйства рядом с эффектом животного?
-4. Совпадают ли оценки rrBLUP и somer друг с другом и с известной истинной племенной ценностью?
+1. Как оценить качество изделия по таблице связей, если панели ещё нет?
+2. Как объединить связи и маркеры в матрицу H?
+3. Как добавить случайный эффект завода рядом с эффектом изделия?
+4. Совпадают ли rrBLUP и sommer друг с другом и с известным `true_value`?
+5. Как собрать сводный индекс из нескольких признаков и отсечь неточные оценки?
+6. Меняется ли средний индекс **текущего** состава, а не архива?
 
-Тема — **генетическая оценка животных**. Данные синтетические: родословная, фенотипы, SNP и эталонная TBV.
+Тема нарочно нейтральная: **контроль качества продукции**. В данных нет отраслевых идентификаторов, только производственные показатели и связи между позициями линии.
 
 ---
 
@@ -24,25 +26,17 @@
 ```text
 .
 ├── README.md
-├── r_blup.Rproj                   проект R / RStudio
-├── 01_rrblup_pedigree.ipynb       pedigree BLUP (rrBLUP, матрица A)
-├── 02_rrblup_ssgblup.ipynb        ssGBLUP (rrBLUP, матрица H)
-├── 03_rrblup_farm_effect.ipynb    ssGBLUP плюс случайный эффект хозяйства
-├── 04_somer.ipynb                 смешанная модель в somer (`mmes`)
-├── 05_methods_comparison.ipynb    производительность и сравнение методов
-├── data/
-│   ├── pedigree.csv               animal, sire, dam
-│   ├── phenotypes.csv             признак, фиксированные эффекты, tbv
-│   ├── genotypes.csv              SNP-строка у части животных
-│   └── estimations.csv            эталон: progenes = TBV
-└── tools/
-    ├── generate_data.R            синтетические CSV в data/
-    ├── execute_notebooks.R        прогон всех ноутбуков
-    ├── execute_one_notebook.R     выполнение одного ноутбука
-    └── merge_notebook_outputs.py  вшивка вывода в .ipynb
+├── 01_lineage_blup.ipynb             BLUP по таблице связей (матрица A)
+├── 02_marker_blup.ipynb              ssGBLUP (матрица H)
+├── 03_factory_effect.ipynb           H плюс случайный эффект завода
+├── 04_somer.ipynb                    смешанная модель в sommer (`mmes`)
+├── 05_methods_comparison.ipynb       сравнение методов и эталона
+├── 06_index_accuracy.ipynb           сводный индекс и reliability
+├── 07_dynamic_index.ipynb            динамика индекса состава
+└── data/                             синтетические CSV для отчётов
 ```
 
-Читать по номерам: `01` → `05`. Каждый файл начинается с блока **«О документе»**: источник данных, цель, короткий результат.
+Читать по номерам: `01` → `07`. Каждый файл начинается с блока **«О документе»**: источник данных, цель, короткий результат.
 
 ---
 
@@ -50,45 +44,27 @@
 
 | Файл | Вопрос | Данные | Методы |
 |---|---|---|---|
-| [`01_rrblup_pedigree.ipynb`](01_rrblup_pedigree.ipynb) | Как оценить EBV только по родословной? | [`data/pedigree.csv`](data/pedigree.csv), [`data/phenotypes.csv`](data/phenotypes.csv) | A-матрица, `mixed.solve`, SE, reliability |
-| [`02_rrblup_ssgblup.ipynb`](02_rrblup_ssgblup.ipynb) | Как учесть и родословную, и SNP? | + [`data/genotypes.csv`](data/genotypes.csv) | матрицы A, M, G, H; `mixed.solve` |
-| [`03_rrblup_farm_effect.ipynb`](03_rrblup_farm_effect.ipynb) | Как добавить случайный эффект фермы? | то же + `economy` | две Z-матрицы, блочная K |
-| [`04_somer.ipynb`](04_somer.ipynb) | Та же модель формулой `mmes`? | то же | `vsm(ism(animal), Gu = H)` |
-| [`05_methods_comparison.ipynb`](05_methods_comparison.ipynb) | Согласованы ли rrBLUP, somer и эталон? | `phenotypes.csv`, `pedigree.csv` | Спирмен, Манна–Уитни, Бланд–Альтман |
+| [`01_lineage_blup.ipynb`](01_lineage_blup.ipynb) | Как оценить качество только по связям? | [`data/lineage.csv`](data/lineage.csv), [`data/measurements.csv`](data/measurements.csv) | A-матрица, `mixed.solve`, SE, reliability |
+| [`02_marker_blup.ipynb`](02_marker_blup.ipynb) | Как учесть и связи, и панель? | + [`data/markers.csv`](data/markers.csv) | матрицы A, M, G, H; `mixed.solve` |
+| [`03_factory_effect.ipynb`](03_factory_effect.ipynb) | Как добавить случайный эффект завода? | то же + `factory` | две Z-матрицы, блочная K |
+| [`04_somer.ipynb`](04_somer.ipynb) | Та же модель формулой `mmes`? | то же | `vsm(ism(item_id), Gu = H)` |
+| [`05_methods_comparison.ipynb`](05_methods_comparison.ipynb) | Согласованы ли A, H и эталон? | + [`data/reference.csv`](data/reference.csv) | Спирмен, Манна–Уитни, Бланд–Альтман |
+| [`06_index_accuracy.ipynb`](06_index_accuracy.ipynb) | Как собрать индекс из трёх признаков? | `measurements.csv` | z-оценки, веса, порог reliability |
+| [`07_dynamic_index.ipynb`](07_dynamic_index.ipynb) | Что происходит с составом во времени? | + [`data/inventory.csv`](data/inventory.csv) | средний индекс изделий, которые ещё в составе |
 
-### Таблицы
+### Показатели
 
-| Файл | Содержание |
+| Код | Смысл |
 |---|---|
-| `pedigree.csv` | `animal`, `sire`, `dam` (у основателей родители = 0) |
-| `phenotypes.csv` | признак `trait`, фиксированные эффекты, хозяйство, истинная `tbv` |
-| `genotypes.csv` | SNP-строка `gen` у части животных (`nom_osn`) |
-| `estimations.csv` | эталон для сравнения: `progenes` = TBV |
-
----
-
-## Как пересобрать
-
-Нужны **R 4.x**, пакеты ниже и **Python 3** (`json`).
-
-```r
-install.packages(c(
-  "rrBLUP", "AGHmatrix", "pedigreeTools", "sommer",
-  "dplyr", "tidyr", "stringr", "e1071", "ggplot2",
-  "knitr", "Matrix", "jsonlite", "evaluate", "base64enc"
-))
-```
-
-Из корня репозитория:
-
-```bash
-Rscript tools/generate_data.R
-Rscript tools/execute_notebooks.R
-```
-
-Первая команда пишет CSV в `data/`. Вторая заново выполняет все ячейки и сохраняет вывод в ноутбуках.
-
-Демо-данные синтетические (`set.seed(42)`), чтобы репозиторий был самодостаточным. Скрипт генерации можно заменить своими выгрузками с теми же именами столбцов.
+| `item_id` | изделие / позиция линии |
+| `parent_a`, `parent_b` | предыдущие позиции, от которых ведётся линия |
+| `trait` | основной измеренный признак качества |
+| `trait_process`, `trait_product` | процессный и продуктовый признаки для индекса |
+| `true_value` | известный в демо скрытый уровень качества |
+| `factory` | площадка |
+| `panel` | строка маркерных кодов `0/1/2` |
+| `overall_index` | сводный индекс |
+| `reliability` | точность оценки |
 
 ---
 
@@ -97,3 +73,15 @@ Rscript tools/execute_notebooks.R
 - Jupyter Notebook, ядро R.
 - Русские заголовки, английские имена переменных в обратных кавычках.
 - В начале каждого файла — паспорт отчёта, в конце — короткое заключение.
+
+---
+
+## Данные
+
+| Файл | Содержание |
+|---|---|
+| `lineage.csv` | `item_id`, `parent_a`, `parent_b` (у истоков линии родители = 0) |
+| `measurements.csv` | признаки, фиксированные эффекты, завод, `true_value` |
+| `markers.csv` | маркерная строка `panel` у части изделий |
+| `reference.csv` | эталон `true_value` для сравнения |
+| `inventory.csv` | даты поступления и выбытия для динамики состава |

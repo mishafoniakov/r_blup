@@ -2,11 +2,13 @@
 # Usage from repo root: Rscript tools/execute_notebooks.R
 
 files <- c(
-  "01_rrblup_pedigree.ipynb",
-  "02_rrblup_ssgblup.ipynb",
-  "03_rrblup_farm_effect.ipynb",
+  "01_lineage_blup.ipynb",
+  "02_marker_blup.ipynb",
+  "03_factory_effect.ipynb",
   "04_somer.ipynb",
-  "05_methods_comparison.ipynb"
+  "05_methods_comparison.ipynb",
+  "06_index_accuracy.ipynb",
+  "07_dynamic_index.ipynb"
 )
 
 for (f in files) {
